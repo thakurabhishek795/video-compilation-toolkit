@@ -23,6 +23,7 @@ class RenameRequest(BaseModel):
 class SuggestRequest(BaseModel):
     media_dir: str
     video_name: str
+    model: str = "llava"
 
 @app.get("/")
 def health_check():
@@ -44,7 +45,7 @@ def rename_video(req: RenameRequest):
 @app.post("/library/ai-suggest")
 def suggest_video_name(req: SuggestRequest):
     try:
-        suggested = core.suggest_video_name(req.media_dir, req.video_name)
+        suggested = core.suggest_video_name(req.media_dir, req.video_name, req.model)
         return {"message": "AI successfully generated a name.", "suggested_name": suggested}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

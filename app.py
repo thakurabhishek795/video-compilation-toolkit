@@ -25,13 +25,14 @@ else:
             st.text(v)
 
 st.subheader("Rename Video")
+ai_model = st.selectbox("Select AI Vision Model", ["llava", "deepseek-coder-v2", "bakllava", "moondream"])
 col_A, col_B, col_C = st.columns([2, 2, 1])
 with col_A:
     rename_sel = st.selectbox("Select video to rename", videos) if videos else st.empty()
     if st.button("✨ Auto-Suggest Name"):
-        with st.spinner("Asking AI..."):
+        with st.spinner(f"Asking {ai_model}..."):
             try:
-                suggested = core.suggest_video_name(media_dir, rename_sel)
+                suggested = core.suggest_video_name(media_dir, rename_sel, ai_model)
                 st.session_state.suggested_name = suggested + ".mp4"
             except Exception as e:
                 st.error(e)

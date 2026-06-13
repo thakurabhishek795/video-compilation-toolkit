@@ -23,7 +23,7 @@ def rename_video(media_dir: str, old_name: str, new_name: str):
     os.rename(old_path, new_path)
     return new_name
 
-def suggest_video_name(media_dir: str, video_name: str):
+def suggest_video_name(media_dir: str, video_name: str, model: str = "llava"):
     vid_name = os.path.splitext(video_name)[0].replace(" ", "_")
     sheet_path = os.path.join(media_dir, "contact_sheets", f"{vid_name}_contact_sheet.jpg")
     
@@ -36,7 +36,7 @@ def suggest_video_name(media_dir: str, video_name: str):
     prompt = "Analyze these video keyframes. Describe the main subject in 2 to 4 words. Use underscores instead of spaces. Do not include file extensions. Example: afghan_girls_studying"
     
     payload = {
-        "model": "llava",
+        "model": model,
         "prompt": prompt,
         "images": [img_b64],
         "stream": False
