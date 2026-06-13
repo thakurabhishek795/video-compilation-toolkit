@@ -8,6 +8,8 @@ Open your web browser and navigate to:
 
 Use this UI to visually browse your folders, view contact sheets, and manually queue up exports. You can also use the **✨ Auto-Suggest Name** button to have a local AI Vision model (`LLaVA`) analyze your videos and instantly suggest descriptive filenames!
 
+You can also use the **AI Director** section to paste your final video script. The AI will automatically analyze your entire video library and generate a complete storyboard, suggesting the perfect clip for each script segment!
+
 ## Agentic AI Interface (FastAPI)
 The API server is running in the background at:
 **[http://localhost:8000](http://localhost:8000)**

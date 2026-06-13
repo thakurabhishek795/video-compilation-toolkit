@@ -112,3 +112,53 @@ if st.session_state.clips:
             with st.spinner("Compiling..."):
                 final_out = core.compile_unified_broll(media_dir, st.session_state.clips)
                 st.success(f"Unified B-roll compiled to {final_out}")
+
+st.header("4. AI Director (Storyboard)")
+st.markdown("Paste your script below. The AI will analyze your text, review the contact sheets, and automatically suggest the best clips for each scene.")
+
+script_text = st.text_area("Final Video Script", height=200, placeholder="Type or paste your script here...")
+director_model = st.selectbox("Select AI Director Model", ["llava", "deepseek-coder-v2", "bakllava", "moondream"], key="director_model")
+
+if st.button("🎬 Generate Storyboard"):
+    if not script_text.strip():
+        st.warning("Please enter a script first.")
+    else:
+        with st.spinner(f"The AI Director ({director_model}) is reading the script and reviewing contact sheets..."):
+            try:
+                storyboard = core.generate_storyboard(media_dir, script_text, director_model)
+                st.session_state.storyboard = storyboard
+                st.success("Storyboard generated successfully!")
+            except Exception as e:
+                st.error(str(e))
+
+if "storyboard" in st.session_state and st.session_state.storyboard:
+    st.markdown("---")
+    st.subheader("Generated Storyboard")
+    
+    for scene in st.session_state.storyboard:
+        with st.container():
+            st.markdown(f"### Scene {scene.get('scene_number', '?')}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Script Segment:**")
+                st.info(scene.get('script_segment', ''))
+                st.markdown("**Visual Concept:**")
+                st.write(scene.get('visual_concept', ''))
+            with col2:
+                clip = scene.get('suggested_clip', '')
+                st.markdown("**Suggested Clip:**")
+                st.success(clip)
+                st.markdown("**Editing Tips:**")
+                st.warning(scene.get('editing_tips', ''))
+                
+                if st.button(f"Add Scene {scene.get('scene_number', '?')} to Queue", key=f"add_scene_{scene.get('scene_number', '?')}"):
+                    if "clips" not in st.session_state:
+                        st.session_state.clips = []
+                    st.session_state.clips.append({
+                        "video": clip,
+                        "start": "00:00:00",
+                        "duration": "00:00:05",
+                        "out_name": f"scene_{scene.get('scene_number', '?')}.mp4"
+                    })
+                    st.rerun()
+        st.markdown("---")

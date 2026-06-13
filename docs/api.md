@@ -30,12 +30,17 @@ Sends the video's contact sheet to the local Ollama LLaVA model to automatically
 *   **Body (JSON)**: `{"media_dir": "...", "video_name": "..."}`
 *   **Response**: `{"message": "...", "suggested_name": "drone_city_view"}`
 
-### 4. `POST /library/keyframes`
+### 4. `POST /director/storyboard`
+Acts as an AI film director. Analyzes a script alongside all contact sheets in the media library and outputs a structured JSON storyboard recommending specific clips for each scene.
+*   **Body (JSON)**: `{"media_dir": "...", "script": "...", "model": "llava"}`
+*   **Response**: `{"message": "...", "storyboard": [...]}`
+
+### 5. `POST /library/keyframes`
 Triggers the extraction of keyframes and generates visual contact sheets.
 *   **Query Params**: `media_dir` (string)
 *   **Response**: `{"message": "...", "results": [...]}`
 
-### 5. `POST /export/clips`
+### 6. `POST /export/clips`
 Extracts defined video segments into individual, normalized silent MP4 files.
 *   **Body (JSON)**: 
     ```json
@@ -47,7 +52,7 @@ Extracts defined video segments into individual, normalized silent MP4 files.
     }
     ```
 
-### 6. `POST /export/compile`
+### 7. `POST /export/compile`
 Extracts and seamlessly merges defined video segments into a single `final_broll_compilation.mp4`.
 *   **Body (JSON)**: Same as `/export/clips`.
 *   **Response**: `{"message": "B-roll compiled successfully.", "file": "path/to/final.mp4"}`

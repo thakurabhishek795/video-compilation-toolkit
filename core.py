@@ -149,3 +149,78 @@ def compile_unified_broll(media_dir: str, clips: list):
         if os.path.exists(norm_path): os.remove(norm_path)
     if os.path.exists(concat_list_path): os.remove(concat_list_path)
     return final_out
+
+def generate_storyboard(media_dir: str, script: str, model: str = "llava"):
+    sheet_files = sorted(get_contact_sheets(media_dir))
+    if not sheet_files:
+        raise FileNotFoundError("No contact sheets found in the library. Please generate them first.")
+    
+    images_b64 = []
+    file_mapping = []
+    for i, sf in enumerate(sheet_files):
+        # We assume the contact sheet name is <video_name_without_ext>_contact_sheet.jpg
+        # Though it might not end in mp4 originally, we'll suggest it as mp4 for simplicity
+        vid_name = sf.replace("_contact_sheet.jpg", "") + ".mp4"
+        file_mapping.append(f"Image {i+1}: {vid_name}")
+        with open(os.path.join(media_dir, "contact_sheets", sf), "rb") as f:
+            images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
+            
+    mapping_text = "\n".join(file_mapping)
+    
+    prompt = f"""You are an expert AI Film Director. 
+I have provided you with a script, and {len(images_b64)} contact sheets (visual grids of keyframes) from my available video library. 
+The contact sheets are provided as images in the following order:
+{mapping_text}
+
+Here is the script:
+\"\"\"{script}\"\"\"
+
+Break the script down into logical scenes. For each scene, review the contact sheets and choose the most visually appropriate video file from the list.
+Output your response as a RAW JSON array. Do not wrap the JSON in markdown blocks. Do not add any conversational text.
+Format:
+[
+  {{
+    "scene_number": 1,
+    "script_segment": "exact text from script",
+    "visual_concept": "describe what we see",
+    "suggested_clip": "filename.mp4",
+    "editing_tips": "e.g., slow zoom, cut on action"
+  }}
+]"""
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "images": images_b64,
+        "stream": False,
+        "options": {
+            "temperature": 0.2
+        }
+    }
+    
+    req = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}
+    )
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            suggested = result.get('response', '').strip()
+            
+            # Clean markdown block if the model ignores the prompt instruction
+            if suggested.startswith("```json"):
+                suggested = suggested[7:]
+            elif suggested.startswith("```"):
+                suggested = suggested[3:]
+            if suggested.endswith("```"):
+                suggested = suggested[:-3]
+                
+            return json.loads(suggested.strip())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Failed to communicate with Ollama: HTTP {e.code}")
+    except json.JSONDecodeError:
+        raise RuntimeError(f"AI failed to return valid JSON. Raw output: {suggested}")
+    except Exception as e:
+        raise RuntimeError(f"Storyboard generation failed: {str(e)}")

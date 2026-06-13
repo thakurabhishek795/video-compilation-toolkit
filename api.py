@@ -25,6 +25,11 @@ class SuggestRequest(BaseModel):
     video_name: str
     model: str = "llava"
 
+class StoryboardRequest(BaseModel):
+    media_dir: str
+    script: str
+    model: str = "llava"
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "Video Compilation API is running."}
@@ -47,6 +52,14 @@ def suggest_video_name(req: SuggestRequest):
     try:
         suggested = core.suggest_video_name(req.media_dir, req.video_name, req.model)
         return {"message": "AI successfully generated a name.", "suggested_name": suggested}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/director/storyboard")
+def generate_storyboard(req: StoryboardRequest):
+    try:
+        storyboard = core.generate_storyboard(req.media_dir, req.script, req.model)
+        return {"message": "Storyboard generated successfully.", "storyboard": storyboard}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
