@@ -1,0 +1,5 @@
+- [/] Ensure Ollama is installed and `llava` model is pulled.
+- [x] Add `suggest_video_name` logic to `core.py` (API call to local Ollama).
+- [x] Add `/library/ai-suggest` endpoint to `api.py`.
+- [x] Add ✨ Suggest Name button to Streamlit `app.py`.
+- [x] Restart the FastAPI server and verify.
