@@ -6,6 +6,33 @@ import urllib.request
 import json
 import base64
 import requests
+import difflib
+
+def _extract_json_object(text: str):
+    start_idx = text.find('{')
+    if start_idx == -1:
+        return text
+    
+    count = 0
+    in_string = False
+    escape = False
+    for i in range(start_idx, len(text)):
+        c = text[i]
+        if not escape:
+            if c == '"':
+                in_string = not in_string
+            elif not in_string:
+                if c == '{':
+                    count += 1
+                elif c == '}':
+                    count -= 1
+                    if count == 0:
+                        return text[start_idx:i+1]
+        if c == '\\' and not escape:
+            escape = True
+        else:
+            escape = False
+    return text
 
 def _extract_json_array(text: str):
     start_idx = text.find('[')
@@ -36,7 +63,8 @@ def _extract_json_array(text: str):
 def get_videos(media_dir: str):
     if not os.path.isdir(media_dir):
         return []
-    return [f for f in os.listdir(media_dir) if f.endswith(".mp4") and not f.startswith(".")]
+    ignore_list = ["final_broll_compilation", "ai_test_output", "afghanistan_broll"]
+    return [f for f in os.listdir(media_dir) if f.endswith(".mp4") and not f.startswith(".") and not any(ign in f.lower() for ign in ignore_list)]
 
 def rename_video(media_dir: str, old_name: str, new_name: str):
     if not new_name.endswith(".mp4"):
@@ -51,6 +79,9 @@ def rename_video(media_dir: str, old_name: str, new_name: str):
     return new_name
 
 def suggest_video_name(media_dir: str, video_name: str, model: str = "llava"):
+    if model == "moondream":
+        model = "moondream-large"
+        
     vid_name = os.path.splitext(video_name)[0].replace(" ", "_")
     sheet_path = os.path.join(media_dir, "contact_sheets", f"{vid_name}_contact_sheet.jpg")
     
@@ -121,6 +152,7 @@ def generate_keyframes_and_sheets(media_dir: str):
                 w, h = images[0].size
                 sheet = Image.new('RGB', (cols * w, rows * h), (255, 255, 255))
                 
+                timestamps = []
                 for i, img in enumerate(images):
                     x = (i % cols) * w
                     y = (i // cols) * h
@@ -133,13 +165,17 @@ def generate_keyframes_and_sheets(media_dir: str):
                     end_sec = (i + 1) * 10
                     start_str = f"{start_sec//60:02d}:{start_sec%60:02d}"
                     end_str = f"{end_sec//60:02d}:{end_sec%60:02d}"
-                    text = f" {start_str} - {end_str} "
+                    text = f" {video} | {start_str} - {end_str} "
+                    timestamps.append(text.strip())
                     
-                    draw.rectangle([x, y, x + 105, y + 25], fill="black")
+                    width = 105 + (len(video) * 6)
+                    draw.rectangle([x, y, x + width, y + 25], fill="black")
                     draw.text((x + 5, y + 5), text, fill="white")
                 
                 sheet_path = os.path.join(sheets_dir, f"{vid_name}_contact_sheet.jpg")
-                sheet.save(sheet_path)
+                exif = sheet.getexif()
+                exif[37510] = f"Video: {video} | Timestamps: {', '.join(timestamps)}"
+                sheet.save(sheet_path, exif=exif)
                 results.append(f"Sheet generated for {video}")
             except Exception as e:
                 results.append(f"Error creating sheet for {video}: {e}")
@@ -154,14 +190,20 @@ def get_contact_sheets(media_dir: str):
 def export_individual_clips(media_dir: str, clips: list):
     out_dir = os.path.join(media_dir, "exported_clips")
     os.makedirs(out_dir, exist_ok=True)
-    for i, clip in enumerate(clips):
-        input_path = os.path.join(media_dir, clip['video'])
-        temp_cut = os.path.join(out_dir, f"temp_{i}.mp4")
-        output_path = os.path.join(out_dir, clip['out_name'])
+    for clip in clips:
+        input_path = os.path.join(media_dir, clip['File Name'])
+        output_path = os.path.join(out_dir, clip['Output Name'])
         
-        subprocess.run(["ffmpeg", "-y", "-ss", clip['start'], "-i", input_path, "-t", clip['duration'], "-c", "copy", temp_cut], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ffmpeg", "-y", "-i", temp_cut, "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p", "-r", "25", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(temp_cut): os.remove(temp_cut)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", clip['Start Time'],
+            "-i", input_path,
+            "-t", clip['Duration'],
+            "-c", "copy",
+            output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
     return out_dir
 
 def compile_unified_broll(media_dir: str, clips: list):
@@ -171,18 +213,25 @@ def compile_unified_broll(media_dir: str, clips: list):
     
     with open(concat_list_path, "w") as f:
         for i, clip in enumerate(clips):
-            input_path = os.path.join(media_dir, clip['video'])
+            input_path = os.path.join(media_dir, clip['File Name'])
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Source file not found: {clip['File Name']}. This is likely a hallucinated clip from an older storyboard generation. Please CLEAR your Queue and generate a new storyboard.")
+            
             temp_cut = os.path.join(out_dir, f"temp_{i}.mp4")
             output_path = os.path.join(out_dir, f"norm_{i}.mp4")
             
-            subprocess.run(["ffmpeg", "-y", "-ss", clip['start'], "-i", input_path, "-t", clip['duration'], "-c", "copy", temp_cut], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["ffmpeg", "-y", "-i", temp_cut, "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p", "-r", "25", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res1 = subprocess.run(["ffmpeg", "-y", "-ss", clip['Start Time'], "-i", input_path, "-t", clip['Duration'], "-c", "copy", temp_cut], capture_output=True, text=True)
+            if res1.returncode != 0: raise RuntimeError(f"FFMPEG Error (cut): {res1.stderr}")
+            
+            res2 = subprocess.run(["ffmpeg", "-y", "-i", temp_cut, "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p", "-r", "25", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path], capture_output=True, text=True)
+            if res2.returncode != 0: raise RuntimeError(f"FFMPEG Error (scale): {res2.stderr}")
             if os.path.exists(temp_cut): os.remove(temp_cut)
             
             f.write(f"file '{output_path}'\n")
     
     final_out = os.path.join(media_dir, "final_broll_compilation.mp4")
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    res3 = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", final_out], capture_output=True, text=True)
+    if res3.returncode != 0: raise RuntimeError(f"FFMPEG Error (concat): {res3.stderr}")
     
     for i in range(len(clips)):
         norm_path = os.path.join(out_dir, f"norm_{i}.mp4")
@@ -195,13 +244,18 @@ def generate_storyboard(media_dir: str, script: str, model: str = "llava"):
     if not sheet_files:
         raise FileNotFoundError("No contact sheets found in the library. Please generate them first.")
 
+    videos = get_videos(media_dir)
+    reverse_map = {os.path.splitext(v)[0].replace(" ", "_"): v for v in videos}
+
     # HYBRID APPROACH: If moondream or deepseek is selected, use Moondream for vision and Deepseek for JSON
     if model in ["moondream", "deepseek-coder-v2"]:
         captions = []
         for i, sf in enumerate(sheet_files):
-            vid_name = sf.replace("_contact_sheet.jpg", "") + ".mp4"
+            underscored_vid_name = sf.replace("_contact_sheet.jpg", "")
+            real_vid_name = reverse_map.get(underscored_vid_name, underscored_vid_name + ".mp4")
             with open(os.path.join(media_dir, "contact_sheets", sf), "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode("utf-8")
+            
             
             payload = {
                 "model": "moondream",
@@ -214,9 +268,9 @@ def generate_storyboard(media_dir: str, script: str, model: str = "llava"):
                 with urllib.request.urlopen(req) as response:
                     res = json.loads(response.read().decode('utf-8'))
                     cap = res.get("response", "").strip()
-                    captions.append(f"Image {i+1} ({vid_name}): {cap}")
+                    captions.append(f"Image {i+1} ({real_vid_name}): {cap}")
             except Exception:
-                captions.append(f"Image {i+1} ({vid_name}): (Visual analysis failed)")
+                captions.append(f"Image {i+1} ({real_vid_name}): (Visual analysis failed)")
 
         mapping_text = "\n".join(captions)
         
@@ -227,20 +281,35 @@ I have a script and a list of videos with their visual descriptions:
 Script:
 \"\"\"{script}\"\"\"
 
-Break the script down into logical scenes. Choose the most visually appropriate video file from the list for each scene.
-Output your response as a RAW JSON array. Do not wrap the JSON in markdown blocks. Do not add conversational text.
+Break the script down into an Event-Based storyboard. Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add conversational text. Use actions: insert_broll, music_change, transition, text_overlay.
 Format:
-[
-  {{
-    "scene_number": 1,
-    "script_segment": "exact text from script",
-    "visual_concept": "describe what we see",
-    "suggested_clip": "filename.mp4",
-    "start_time": "00:00:00",
-    "duration": "00:00:10",
-    "editing_tips": "e.g., slow zoom, cut on action"
+{{
+  "metadata": {{
+    "video_id": "auto",
+    "duration_sec": 0,
+    "generated_by": "deepseek-coder-v2"
+  }},
+  "storyboard": [
+    {{
+      "timestamp": "0:00",
+      "timestamp_sec": 0.0,
+      "action": "insert_broll",
+      "subtype": "none",
+      "description": "Visual description and reason",
+      "source_start_timestamp": "00:00:00",
+      "duration_suggestion_sec": 10.0,
+      "confidence": 0.9,
+      "priority": "high",
+      "suggested_clip": "filename.mp4"
+    }}
+  ],
+  "summary": {{
+    "total_suggestions": 1,
+    "high_priority": 1,
+    "medium_priority": 0,
+    "estimated_edit_time_min": 5
   }}
-]"""
+}}"""
         # Force Deepseek for perfect JSON formatting
         text_model = "deepseek-coder-v2"
 
@@ -254,8 +323,9 @@ Format:
         images_b64 = []
         file_mapping = []
         for i, sf in enumerate(sheet_files):
-            vid_name = sf.replace("_contact_sheet.jpg", "") + ".mp4"
-            file_mapping.append(f"Image {i+1}: {vid_name}")
+            underscored_vid_name = sf.replace("_contact_sheet.jpg", "")
+            real_vid_name = reverse_map.get(underscored_vid_name, underscored_vid_name + ".mp4")
+            file_mapping.append(f"Image {i+1}: {real_vid_name}")
             with open(os.path.join(media_dir, "contact_sheets", sf), "rb") as f:
                 images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
                 
@@ -269,20 +339,37 @@ The contact sheets are provided as images in the following order:
 Here is the script:
 \"\"\"{script}\"\"\"
 
-Break the script down into logical scenes. For each scene, review the contact sheets and choose the most visually appropriate video file from the list.
-Output your response as a RAW JSON array. Do not wrap the JSON in markdown blocks. Do not add any conversational text.
+Break the script down into an Event-Based storyboard. For each event, review the contact sheets and choose the most visually appropriate video file from the list. 
+IMPORTANT: Look at the text printed on the specific frame you chose. Extract the start timestamp (e.g. "00:01:00") and put it into the `source_start_timestamp` field.
+Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add any conversational text. Use actions: insert_broll, music_change, transition, text_overlay.
 Format:
-[
-  {{
-    "scene_number": 1,
-    "script_segment": "exact text from script",
-    "visual_concept": "describe what we see",
-    "suggested_clip": "filename.mp4",
-    "start_time": "00:00:00",
-    "duration": "00:00:10",
-    "editing_tips": "e.g., slow zoom, cut on action"
+{{
+  "metadata": {{
+    "video_id": "auto",
+    "duration_sec": 0,
+    "generated_by": "llava"
+  }},
+  "storyboard": [
+    {{
+      "timestamp": "0:00",
+      "timestamp_sec": 0.0,
+      "action": "insert_broll",
+      "subtype": "none",
+      "description": "Visual description and reason",
+      "source_start_timestamp": "00:00:00",
+      "duration_suggestion_sec": 10.0,
+      "confidence": 0.9,
+      "priority": "high",
+      "suggested_clip": "filename.mp4"
+    }}
+  ],
+  "summary": {{
+    "total_suggestions": 1,
+    "high_priority": 1,
+    "medium_priority": 0,
+    "estimated_edit_time_min": 5
   }}
-]"""
+}}"""
 
         payload = {
             "model": model,
@@ -306,9 +393,45 @@ Format:
             result = json.loads(response.read().decode('utf-8'))
             suggested = result.get('response', '').strip()
             
-            clean_json = _extract_json_array(suggested)
+            clean_json = _extract_json_object(suggested)
+            data = json.loads(clean_json.strip(), strict=False)
+            if "storyboard" in data:
+                mapping = {}
+                for idx, sf in enumerate(sheet_files):
+                    underscored_vid_name = sf.replace("_contact_sheet.jpg", "")
+                    real_vid_name = reverse_map.get(underscored_vid_name, underscored_vid_name + ".mp4")
+                    mapping[f"Image {idx+1}"] = real_vid_name
                 
-            return json.loads(clean_json.strip(), strict=False)
+                real_names = list(mapping.values())
+                
+                for event in data["storyboard"]:
+                    clip = str(event.get("suggested_clip", ""))
+                    # Exact Match (by Image Number)
+                    if clip in mapping:
+                        event["suggested_clip"] = mapping[clip]
+                        continue
+                        
+                    # Exact Match (by Real Name)
+                    if clip in real_names:
+                        continue
+                        
+                    # Fuzzy match the filename
+                    matches = difflib.get_close_matches(clip, real_names, n=1, cutoff=0.3)
+                    if matches:
+                        event["suggested_clip"] = matches[0]
+                        continue
+                        
+                    # Fallback mapping
+                    matched = False
+                    for img_label, actual_filename in mapping.items():
+                        if clip.startswith(img_label) or actual_filename in clip or clip in actual_filename:
+                            event["suggested_clip"] = actual_filename
+                            matched = True
+                            break
+                            
+                    if not matched and real_names:
+                        event["suggested_clip"] = real_names[0]
+            return data
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode('utf-8')
         raise RuntimeError(f"Failed to communicate with Ollama: HTTP {e.code} - {err_msg}")
@@ -445,3 +568,127 @@ def generate_music(prompt: str, duration: int, api_key: str, out_name: str, medi
         raise RuntimeError(f"ACE-Step API error: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Music generation failed: {str(e)}")
+
+def generate_fcpxml(media_dir: str, clips: list):
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+    import os
+
+    def sec_to_fcpxml_time(time_str):
+        if not time_str or time_str == "Unknown":
+            return "0s"
+        parts = time_str.split(":")
+        if len(parts) == 3:
+            h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+            total_sec = h * 3600 + m * 60 + s
+            if total_sec == int(total_sec):
+                return f"{int(total_sec)}s"
+            return f"{int(total_sec * 1000)}/1000s"
+        return "0s"
+
+    fcpxml = ET.Element("fcpxml", version="1.9")
+    resources = ET.SubElement(fcpxml, "resources")
+    ET.SubElement(resources, "format", id="r1", name="FFVideoFormat1080p25", frameDuration="1/25s", width="1920", height="1080")
+
+    library = ET.SubElement(fcpxml, "library")
+    event = ET.SubElement(library, "event", name="B-Roll Compilation")
+    project = ET.SubElement(event, "project", name="Unified Storyboard")
+    sequence = ET.SubElement(project, "sequence", format="r1", tcStart="0s", tcFormat="NDF")
+    spine = ET.SubElement(sequence, "spine")
+
+    assets = {}
+    asset_idx = 2
+    current_offset_sec = 0.0
+
+    for clip in clips:
+        filename = clip['File Name']
+        if filename not in assets:
+            abs_path = os.path.abspath(os.path.join(media_dir, filename))
+            asset_id = f"r{asset_idx}"
+            assets[filename] = asset_id
+            asset_idx += 1
+            ET.SubElement(resources, "asset", id=asset_id, name=filename, src=f"file://{abs_path}", hasVideo="1", hasAudio="1")
+        else:
+            asset_id = assets[filename]
+
+        start_sec_str = sec_to_fcpxml_time(clip['Start Time'])
+        duration_sec_str = sec_to_fcpxml_time(clip['Duration'])
+        
+        dur_parts = clip['Duration'].split(":")
+        dur_val = int(dur_parts[0])*3600 + int(dur_parts[1])*60 + float(dur_parts[2]) if len(dur_parts) == 3 else 0.0
+        
+        offset_sec_str = f"{int(current_offset_sec * 1000)}/1000s" if current_offset_sec != int(current_offset_sec) else f"{int(current_offset_sec)}s"
+        
+        ET.SubElement(spine, "asset-clip", ref=asset_id, offset=offset_sec_str, name=filename, start=start_sec_str, duration=duration_sec_str, format="r1")
+        
+        current_offset_sec += dur_val
+
+    xml_str = ET.tostring(fcpxml, 'utf-8')
+    parsed_xml = minidom.parseString(xml_str)
+    pretty_xml = parsed_xml.toprettyxml(indent="    ")
+    
+    return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + '\n'.join(pretty_xml.split('\n')[1:])
+
+def generate_edl(clips: list, fps: int = 25):
+    lines = [
+        "TITLE:   UNIFIED_STORYBOARD",
+        "FCM: NON-DROP FRAME",
+        ""
+    ]
+    
+    def sec_to_tc(total_sec):
+        h = int(total_sec // 3600)
+        m = int((total_sec % 3600) // 60)
+        s = int(total_sec % 60)
+        f = int(round((total_sec - int(total_sec)) * fps))
+        if f >= fps:
+            s += 1
+            f -= fps
+        return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
+
+    record_in_sec = 0.0
+    
+    for i, clip in enumerate(clips):
+        parts = clip.get('Start Time', '00:00:00').split(":")
+        start_sec = 0.0
+        if len(parts) == 3:
+            start_sec = int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
+            
+        dur_parts = clip.get('Duration', '00:00:00').split(":")
+        dur_sec = 0.0
+        if len(dur_parts) == 3:
+            dur_sec = int(dur_parts[0])*3600 + int(dur_parts[1])*60 + float(dur_parts[2])
+            
+        start_tc = sec_to_tc(start_sec)
+        end_tc = sec_to_tc(start_sec + dur_sec)
+        
+        rec_in_tc = sec_to_tc(record_in_sec)
+        rec_out_tc = sec_to_tc(record_in_sec + dur_sec)
+        
+        event_num = f"{i+1:03d}"
+        
+        lines.append(f"{event_num}  AX       V     C        {start_tc} {end_tc} {rec_in_tc} {rec_out_tc}")
+        lines.append(f"* FROM CLIP NAME: {clip['File Name']}")
+        lines.append("")
+        
+        
+    return "\n".join(lines)
+
+def run_audio_pipeline(media_dir: str, video_filename: str):
+    import os
+    from audio.audio_pipeline import AudioIntelligencePipeline
+    
+    video_path = os.path.join(media_dir, video_filename)
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Source video not found: {video_path}")
+        
+    output_dir = os.path.join(media_dir, "audio_reports")
+    
+    pipeline = AudioIntelligencePipeline(
+        video_path=video_path,
+        whisper_model_size="base",
+        output_dir=output_dir,
+        max_workers=5
+    )
+    
+    return pipeline.run()
