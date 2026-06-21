@@ -62,6 +62,17 @@ def _extract_json_array(text: str):
             escape = False
     return text[start_idx:]
 
+def is_default_whatsapp_name(filename: str):
+    return "WhatsApp Video" in filename or "WhatsApp Image" in filename
+def check_ollama_health() -> bool:
+    """Check if the local Ollama instance is reachable."""
+    try:
+        req = urllib.request.Request("http://localhost:11434/")
+        with urllib.request.urlopen(req, timeout=2) as response:
+            return response.getcode() == 200
+    except Exception:
+        return False
+
 def get_media_files(media_dir: str):
     if not os.path.isdir(media_dir):
         return []

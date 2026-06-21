@@ -22,6 +22,11 @@ if videos:
 else:
     st.warning("No MP4 files found in the selected directory.")
     
+# Ollama Health Check
+ollama_online = core.check_ollama_health()
+if not ollama_online:
+    st.sidebar.warning("⚠️ Local Ollama server is offline. AI Director will be disabled. Start it with `ollama serve`.")
+
 if videos:
     st.success(f"Found {len(videos)} videos in the library.")
     with st.expander("View Available Videos"):
@@ -241,7 +246,9 @@ with tab_script:
     director_display = st.selectbox("Select AI Director Model", list(model_mapping.keys()), key="director_model")
     director_model = model_mapping[director_display]
     
-    if st.button("🎬 Generate Storyboard"):
+    if not ollama_online:
+        st.error("Cannot generate storyboard: Ollama server is offline. Please run `ollama serve`.")
+    elif st.button("🎬 Generate Storyboard"):
         if not media_dir or not os.path.exists(media_dir):
             st.error("Please enter a valid directory.")
         elif not script_text.strip():
@@ -512,7 +519,11 @@ with tab5:
 with tab6:
     st.subheader("🎵 AI Music Generator")
     st.markdown("Generate background music using the ACE-Step API.")
-    ace_api_key = st.text_input("ACE-Step API Key", type="password", value="a64c8deb3c624baabd09c9b541b89c14", key="ace_api_key")
+    try:
+        default_key = st.secrets.get("ace_step_api_key", "")
+    except Exception:
+        default_key = ""
+    ace_api_key = st.text_input("ACE-Step API Key", type="password", value=default_key, key="ace_api_key")
     music_prompt = st.text_area("Prompt (e.g., 'Upbeat corporate tech background')", key="music_prompt")
     music_duration = st.slider("Duration (seconds)", min_value=10, max_value=120, value=30, step=10, key="music_duration")
     music_out = st.text_input("Output Name", value="bg_music.mp3", key="music_out")

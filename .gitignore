@@ -1,6 +1,12 @@
-venv/
+.DS_Store
+scratch/
 __pycache__/
 *.pyc
-.DS_Store
-media/
+.env
+venv/
+.venv/
+*.egg-info/
 .tempmediaStorage/
+exported_clips/
+final_broll_compilation.mp4
+.streamlit/secrets.toml
