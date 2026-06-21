@@ -7,6 +7,8 @@ import json
 import base64
 import requests
 import difflib
+import csv
+from datetime import datetime
 
 def _extract_json_object(text: str):
     start_idx = text.find('{')
@@ -60,11 +62,12 @@ def _extract_json_array(text: str):
             escape = False
     return text[start_idx:]
 
-def get_videos(media_dir: str):
+def get_media_files(media_dir: str):
     if not os.path.isdir(media_dir):
         return []
     ignore_list = ["final_broll_compilation", "ai_test_output", "afghanistan_broll"]
-    return [f for f in os.listdir(media_dir) if f.endswith(".mp4") and not f.startswith(".") and not any(ign in f.lower() for ign in ignore_list)]
+    valid_exts = (".mp4", ".mov", ".jpg", ".jpeg", ".png")
+    return [f for f in os.listdir(media_dir) if f.lower().endswith(valid_exts) and not f.startswith(".") and not any(ign in f.lower() for ign in ignore_list)]
 
 def rename_video(media_dir: str, old_name: str, new_name: str):
     if not new_name.endswith(".mp4"):
@@ -77,6 +80,66 @@ def rename_video(media_dir: str, old_name: str, new_name: str):
         raise FileExistsError(f"Destination file {new_name} already exists.")
     os.rename(old_path, new_path)
     return new_name
+
+def batch_rename_videos_safely(media_dir: str, rename_mapping: dict):
+    """
+    Safely renames multiple videos using a two-phase approach to avoid conflicts.
+    Generates a CSV manifest audit trail.
+    rename_mapping: dict of {old_filename: new_filename}
+    """
+    tmp_mapping = {}
+    
+    # Pre-flight check and ensure .mp4
+    for old_name, new_name in rename_mapping.items():
+        if not new_name.endswith(".mp4"):
+            new_name += ".mp4"
+            rename_mapping[old_name] = new_name
+            
+        old_path = os.path.join(media_dir, old_name)
+        if not os.path.exists(old_path):
+            raise FileNotFoundError(f"Source file {old_name} not found.")
+            
+        # We don't check for new_path existence yet because it might be another old_name being renamed in this batch!
+        
+        tmp_name = old_name + ".renaming_tmp"
+        tmp_mapping[old_name] = tmp_name
+
+    # Phase 1: Rename all to .renaming_tmp
+    for old_name, tmp_name in tmp_mapping.items():
+        old_path = os.path.join(media_dir, old_name)
+        tmp_path = os.path.join(media_dir, tmp_name)
+        os.rename(old_path, tmp_path)
+        
+    # Phase 2: Rename all .renaming_tmp to final names
+    for old_name, new_name in rename_mapping.items():
+        tmp_name = tmp_mapping[old_name]
+        tmp_path = os.path.join(media_dir, tmp_name)
+        new_path = os.path.join(media_dir, new_name)
+        
+        # If destination exists now, it's a conflict!
+        if os.path.exists(new_path):
+            raise FileExistsError(f"Destination file {new_name} already exists. Some files may be stuck as .renaming_tmp!")
+            
+        os.rename(tmp_path, new_path)
+
+    # Generate CSV Audit Trail
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    manifest_name = f"video_rename_manifest_{timestamp}.csv"
+    manifest_path = os.path.join(media_dir, manifest_name)
+    
+    with open(manifest_path, 'w', newline='') as csvfile:
+        fieldnames = ['Timestamp', 'Original Name', 'New Name']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        for old_name, new_name in rename_mapping.items():
+            writer.writerow({
+                'Timestamp': timestamp,
+                'Original Name': old_name,
+                'New Name': new_name
+            })
+            
+    return manifest_path
 
 def suggest_video_name(media_dir: str, video_name: str, model: str = "llava"):
     if model == "moondream":
@@ -121,26 +184,40 @@ def suggest_video_name(media_dir: str, video_name: str, model: str = "llava"):
     except Exception as e:
         raise RuntimeError(f"Failed to communicate with Ollama: {str(e)}")
 
-def generate_keyframes_and_sheets(media_dir: str):
-    videos = get_videos(media_dir)
+def generate_keyframes_and_sheets(media_dir: str, progress_callback=None):
+    media_files = get_media_files(media_dir)
     keyframes_base = os.path.join(media_dir, "keyframes")
     sheets_dir = os.path.join(media_dir, "contact_sheets")
     os.makedirs(sheets_dir, exist_ok=True)
     
     results = []
-    for video in videos:
-        vid_path = os.path.join(media_dir, video)
-        vid_name = os.path.splitext(video)[0].replace(" ", "_")
-        out_dir = os.path.join(keyframes_base, vid_name)
+    total_files = len(media_files)
+    for i, media_file in enumerate(media_files):
+        if progress_callback:
+            progress_callback(i / max(1, total_files), f"Processing {media_file}...")
+            
+        file_path = os.path.join(media_dir, media_file)
+        file_name = os.path.splitext(media_file)[0].replace(" ", "_")
+        out_dir = os.path.join(keyframes_base, file_name)
         os.makedirs(out_dir, exist_ok=True)
         
-        # Extract keyframes (every 10s)
-        fps = "1/10"
-        cmd = [
-            "ffmpeg", "-y", "-i", vid_path, "-vf", f"fps={fps},scale=320:-1",
-            os.path.join(out_dir, "frame_%03d.jpg")
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        is_image = media_file.lower().endswith((".jpg", ".jpeg", ".png"))
+        
+        if is_image:
+            # For images, just copy the image as the single keyframe
+            import shutil
+            dest_frame = os.path.join(out_dir, "frame_001.jpg")
+            shutil.copy2(file_path, dest_frame)
+        else:
+            # Extract keyframes (every 10s)
+            fps = "1/10"
+            cmd = [
+                "ffmpeg", "-y", "-i", file_path, "-vf", f"fps={fps},scale=320:-1",
+                os.path.join(out_dir, "frame_%03d.jpg")
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                print(f"Failed to extract frames for {media_file}: {res.stderr}")
         
         # Generate Contact Sheet
         frames = sorted([f for f in os.listdir(out_dir) if f.endswith(".jpg")])
@@ -179,6 +256,8 @@ def generate_keyframes_and_sheets(media_dir: str):
                 results.append(f"Sheet generated for {video}")
             except Exception as e:
                 results.append(f"Error creating sheet for {video}: {e}")
+    if progress_callback:
+        progress_callback(1.0, "Finished generating all Keyframes and Contact Sheets!")
     return results
 
 def get_contact_sheets(media_dir: str):
@@ -206,7 +285,7 @@ def export_individual_clips(media_dir: str, clips: list):
         
     return out_dir
 
-def compile_unified_broll(media_dir: str, clips: list):
+def compile_unified_broll(media_dir: str, clips: list, burn_captions: bool = False):
     out_dir = os.path.join(media_dir, "exported_clips")
     os.makedirs(out_dir, exist_ok=True)
     concat_list_path = os.path.join(out_dir, "concat_list.txt")
@@ -220,11 +299,39 @@ def compile_unified_broll(media_dir: str, clips: list):
             temp_cut = os.path.join(out_dir, f"temp_{i}.mp4")
             output_path = os.path.join(out_dir, f"norm_{i}.mp4")
             
-            res1 = subprocess.run(["ffmpeg", "-y", "-ss", clip['Start Time'], "-i", input_path, "-t", clip['Duration'], "-c", "copy", temp_cut], capture_output=True, text=True)
-            if res1.returncode != 0: raise RuntimeError(f"FFMPEG Error (cut): {res1.stderr}")
+            is_image = input_path.lower().endswith((".jpg", ".jpeg", ".png"))
             
-            res2 = subprocess.run(["ffmpeg", "-y", "-i", temp_cut, "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p", "-r", "25", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path], capture_output=True, text=True)
-            if res2.returncode != 0: raise RuntimeError(f"FFMPEG Error (scale): {res2.stderr}")
+            if is_image:
+                # For images, create a 5-second video
+                res1 = subprocess.run(["ffmpeg", "-y", "-loop", "1", "-i", input_path, "-t", "5", "-c:v", "libx264", temp_cut], capture_output=True, text=True)
+                if res1.returncode != 0: raise RuntimeError(f"FFMPEG Error (image loop): {res1.stderr}")
+            else:
+                res1 = subprocess.run(["ffmpeg", "-y", "-ss", str(clip.get('Start Time', '0')), "-i", input_path, "-t", str(clip.get('Duration', '5')), "-c", "copy", temp_cut], capture_output=True, text=True)
+                if res1.returncode != 0: raise RuntimeError(f"FFMPEG Error (cut): {res1.stderr}")
+            
+            # Smart formatting: blurred background for vertical video, scale to 1920x1080
+            # Base filter chain for scaling/padding
+            base_filter = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[fg];[0:v]scale=1920:1080:force_original_aspect_ratio=increase,boxblur=20:20[bg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[out]"
+            
+            # If burn_captions is True and caption exists, append drawtext
+            caption = clip.get('Caption', '')
+            if burn_captions and caption:
+                # Clean caption for ffmpeg string escaping
+                caption_clean = caption.replace("'", "").replace(":", "")
+                # Draw text centered at the bottom, white with a black shadow
+                drawtext_filter = f",drawtext=text='{caption_clean}':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=h-th-80:shadowcolor=black:shadowx=2:shadowy=2[out2]"
+                base_filter = base_filter.replace("[out]", "[tmpout]") + drawtext_filter.replace("[out2]", "[out]")
+                filter_cmd = ["-filter_complex", base_filter, "-map", "[out]"]
+            else:
+                filter_cmd = ["-filter_complex", base_filter.replace("[out]", ""), "-map", "[out]"] # Note: The original base filter outputs to [out] implicitly if we just use -vf, but we are using filter_complex
+                # Actually, simpler filter_complex:
+                filter_cmd = ["-filter_complex", base_filter, "-map", "[out]"]
+            
+            # Re-encode video
+            encode_cmd = ["ffmpeg", "-y", "-i", temp_cut] + filter_cmd + ["-r", "30", "-an", "-c:v", "libx264", output_path]
+            res2 = subprocess.run(encode_cmd, capture_output=True, text=True)
+            if res2.returncode != 0: raise RuntimeError(f"FFMPEG Error (scale/format): {res2.stderr}")
+            
             if os.path.exists(temp_cut): os.remove(temp_cut)
             
             f.write(f"file '{output_path}'\n")
@@ -239,13 +346,49 @@ def compile_unified_broll(media_dir: str, clips: list):
     if os.path.exists(concat_list_path): os.remove(concat_list_path)
     return final_out
 
-def generate_storyboard(media_dir: str, script: str, model: str = "llava"):
+def verify_compilation(filepath: str):
+    """
+    Runs ffprobe to verify the final compiled file.
+    Returns a dict with QA metrics.
+    """
+    if not os.path.exists(filepath):
+        return {"Status": "Failed - File not found"}
+        
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,codec_name", "-show_entries", "format=duration", "-of", "json", filepath]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        return {"Status": f"Failed - ffprobe error: {res.stderr}"}
+        
+    try:
+        data = json.loads(res.stdout)
+        stream = data['streams'][0]
+        fmt = data['format']
+        
+        # Parse frame rate (e.g. "30/1")
+        fps_str = stream.get('r_frame_rate', '0/0')
+        parts = fps_str.split('/')
+        if len(parts) == 2 and int(parts[1]) != 0:
+            fps = round(int(parts[0]) / int(parts[1]), 2)
+        else:
+            fps = 0
+            
+        return {
+            "Status": "Passed",
+            "Duration (sec)": round(float(fmt.get('duration', 0)), 2),
+            "Resolution": f"{stream.get('width', 0)}x{stream.get('height', 0)}",
+            "FPS": fps,
+            "Codec": stream.get('codec_name', 'unknown')
+        }
+    except Exception as e:
+        return {"Status": f"Failed - parse error: {str(e)}"}
+
+def generate_storyboard(media_dir: str, script: str, model: str = "llava", stream_callback=None):
     sheet_files = sorted(get_contact_sheets(media_dir))
     if not sheet_files:
         raise FileNotFoundError("No contact sheets found in the library. Please generate them first.")
 
-    videos = get_videos(media_dir)
-    reverse_map = {os.path.splitext(v)[0].replace(" ", "_"): v for v in videos}
+    media_files = get_media_files(media_dir)
+    reverse_map = {os.path.splitext(v)[0].replace(" ", "_"): v for v in media_files}
 
     # HYBRID APPROACH: If moondream or deepseek is selected, use Moondream for vision and Deepseek for JSON
     if model in ["moondream", "deepseek-coder-v2"]:
@@ -257,6 +400,9 @@ def generate_storyboard(media_dir: str, script: str, model: str = "llava"):
                 img_b64 = base64.b64encode(f.read()).decode("utf-8")
             
             
+            if stream_callback:
+                stream_callback(f"Visual analysis: Processing {real_vid_name}...")
+                
             payload = {
                 "model": "moondream",
                 "prompt": "Describe this keyframe collage in 1 sentence. Focus on the visual subjects.",
@@ -281,7 +427,7 @@ I have a script and a list of videos with their visual descriptions:
 Script:
 \"\"\"{script}\"\"\"
 
-Break the script down into an Event-Based storyboard. Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add conversational text. Use actions: insert_broll, music_change, transition, text_overlay.
+Break the script down into an Event-Based storyboard. Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add conversational text. Use actions: insert_broll, music_change, transition, text_overlay. For each clip, generate a 'caption' that summarizes the script beat into a short, punchy, poetic phrase (e.g., 'Behind closed doors').
 Format:
 {{
   "metadata": {{
@@ -298,6 +444,7 @@ Format:
       "description": "Visual description and reason",
       "source_start_timestamp": "00:00:00",
       "duration_suggestion_sec": 10.0,
+      "caption": "Short punchy poetic beat",
       "confidence": 0.9,
       "priority": "high",
       "suggested_clip": "filename.mp4"
@@ -316,7 +463,7 @@ Format:
         payload = {
             "model": text_model,
             "prompt": prompt,
-            "stream": False
+            "stream": True if stream_callback else False
         }
     else:
         # STANDARD APPROACH (e.g. for llava)
@@ -341,7 +488,7 @@ Here is the script:
 
 Break the script down into an Event-Based storyboard. For each event, review the contact sheets and choose the most visually appropriate video file from the list. 
 IMPORTANT: Look at the text printed on the specific frame you chose. Extract the start timestamp (e.g. "00:01:00") and put it into the `source_start_timestamp` field.
-Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add any conversational text. Use actions: insert_broll, music_change, transition, text_overlay.
+Output your response as a RAW JSON object. Do not wrap the JSON in markdown blocks. Do not add any conversational text. Use actions: insert_broll, music_change, transition, text_overlay. For each clip, generate a 'caption' that summarizes the script beat into a short, punchy, poetic phrase (e.g., 'Behind closed doors').
 Format:
 {{
   "metadata": {{
@@ -358,6 +505,7 @@ Format:
       "description": "Visual description and reason",
       "source_start_timestamp": "00:00:00",
       "duration_suggestion_sec": 10.0,
+      "caption": "Short punchy poetic beat",
       "confidence": 0.9,
       "priority": "high",
       "suggested_clip": "filename.mp4"
@@ -375,7 +523,7 @@ Format:
             "model": model,
             "prompt": prompt,
             "images": images_b64,
-            "stream": False,
+            "stream": True if stream_callback else False,
             "options": {
                 "num_ctx": 8192,
                 "temperature": 0.2
@@ -390,8 +538,18 @@ Format:
     
     try:
         with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            suggested = result.get('response', '').strip()
+            if payload.get("stream"):
+                full_text = ""
+                for line in response:
+                    if line:
+                        chunk = json.loads(line.decode('utf-8'))
+                        full_text += chunk.get("response", "")
+                        if stream_callback:
+                            stream_callback(full_text)
+                suggested = full_text.strip()
+            else:
+                result = json.loads(response.read().decode('utf-8'))
+                suggested = result.get('response', '').strip()
             
             clean_json = _extract_json_object(suggested)
             data = json.loads(clean_json.strip(), strict=False)
@@ -674,7 +832,7 @@ def generate_edl(clips: list, fps: int = 25):
         
     return "\n".join(lines)
 
-def run_audio_pipeline(media_dir: str, video_filename: str):
+def run_audio_pipeline(media_dir: str, video_filename: str, progress_callback=None):
     import os
     from audio.audio_pipeline import AudioIntelligencePipeline
     
@@ -691,4 +849,5 @@ def run_audio_pipeline(media_dir: str, video_filename: str):
         max_workers=5
     )
     
-    return pipeline.run()
+    return pipeline.run(progress_callback=progress_callback)
+

@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import core
+import safe_fcpxml
 
 st.set_page_config(page_title="Video Compilation Toolkit", page_icon="🎬", layout="wide")
 
@@ -15,47 +16,28 @@ if not os.path.isdir(media_dir):
     st.error(f"Directory does not exist: {media_dir}")
     st.stop()
 
-videos = core.get_videos(media_dir)
-if not videos:
-    st.warning("No MP4 files found in the selected directory.")
+videos = core.get_media_files(media_dir)
+if videos:
+    st.sidebar.markdown(f"**Found {len(videos)} media files**")
 else:
+    st.warning("No MP4 files found in the selected directory.")
+    
+if videos:
     st.success(f"Found {len(videos)} videos in the library.")
     with st.expander("View Available Videos"):
         for v in videos:
             st.text(v)
 
-st.subheader("Rename Video")
-ai_model = st.selectbox("Select AI Vision Model", ["llava", "deepseek-coder-v2", "bakllava", "moondream"])
-col_A, col_B, col_C = st.columns([2, 2, 1])
-with col_A:
-    rename_sel = st.selectbox("Select video to rename", videos) if videos else st.empty()
-    if st.button("✨ Auto-Suggest Name"):
-        with st.spinner(f"Asking {ai_model}..."):
-            try:
-                suggested = core.suggest_video_name(media_dir, rename_sel, ai_model)
-                st.session_state.suggested_name = suggested + ".mp4"
-            except Exception as e:
-                st.error(e)
-with col_B:
-    default_name = st.session_state.get("suggested_name", "")
-    new_name_input = st.text_input("New descriptive name (e.g., drone_overview.mp4)", value=default_name)
-with col_C:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Rename File"):
-        if new_name_input and rename_sel:
-            try:
-                core.rename_video(media_dir, rename_sel, new_name_input)
-                st.success(f"Renamed {rename_sel} to {new_name_input}")
-                st.session_state.suggested_name = ""
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error renaming: {e}")
-
 st.header("2. Keyframes & Contact Sheets")
 if st.button("Generate Keyframes & Contact Sheets"):
-    with st.spinner("Processing videos... This may take a moment."):
-        core.generate_keyframes_and_sheets(media_dir)
-        st.success("Keyframes and Contact Sheets generated!")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    def keyframe_progress(pct, msg):
+        progress_bar.progress(pct)
+        status_text.text(msg)
+        
+    core.generate_keyframes_and_sheets(media_dir, progress_callback=keyframe_progress)
+    st.success("Keyframes and Contact Sheets generated!")
 
 sheets = core.get_contact_sheets(media_dir)
 if sheets:
@@ -65,6 +47,79 @@ if sheets:
     for i, sheet in enumerate(sheets):
         with cols[i % len(cols)]:
             st.image(os.path.join(sheets_dir, sheet), caption=sheet, use_container_width=True)
+
+st.subheader("Batch Media Rename")
+ai_model = st.selectbox("Select AI Vision Model", ["llava", "moondream"])
+
+rename_sel = st.multiselect("Select videos to rename", videos) if videos else []
+
+if "batch_suggestions" not in st.session_state:
+    st.session_state.batch_suggestions = {}
+
+if st.button("✨ Auto-Suggest Names"):
+    if rename_sel:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        import re
+        max_num = 0
+        for v in videos:
+            match = re.match(r"^video_(\d+)_", v)
+            if match:
+                num = int(match.group(1))
+                if num > max_num:
+                    max_num = num
+                    
+        current_seq = max_num + 1
+        
+        for i, video_file in enumerate(rename_sel):
+            status_text.text(f"Processing {video_file} ({i+1}/{len(rename_sel)})...")
+            try:
+                suggested = core.suggest_video_name(media_dir, video_file, ai_model)
+                prefix = f"video_{current_seq:02d}_"
+                st.session_state.batch_suggestions[video_file] = prefix + suggested + ".mp4"
+                current_seq += 1
+            except Exception as e:
+                st.error(f"Error suggesting name for {video_file}: {e}")
+            progress_bar.progress((i + 1) / len(rename_sel))
+            
+        status_text.text("Finished generating suggestions!")
+    else:
+        st.warning("Please select at least one video to rename.")
+
+# Dictionary to hold the final input values before renaming
+new_names = {}
+
+if rename_sel:
+    st.markdown("### Review & Rename")
+    for video_file in rename_sel:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.text(video_file)
+        with col2:
+            default_val = st.session_state.batch_suggestions.get(video_file, "")
+            new_names[video_file] = st.text_input(f"New name for {video_file}", value=default_val, key=f"rename_input_{video_file}", label_visibility="collapsed")
+            
+    if st.button("Rename All Selected"):
+        mapping = {}
+        for video_file, new_name in new_names.items():
+            if new_name and new_name != video_file:
+                mapping[video_file] = new_name
+                
+        if mapping:
+            with st.spinner("Safely renaming files..."):
+                try:
+                    manifest_path = core.batch_rename_videos_safely(media_dir, mapping)
+                    st.success(f"Renamed {len(mapping)} files successfully!")
+                    st.info(f"Audit Trail Saved: {manifest_path}")
+                    for video_file in mapping:
+                        if video_file in st.session_state.batch_suggestions:
+                            del st.session_state.batch_suggestions[video_file]
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Batch Rename Failed: {e}")
 
 st.header("3. Clip Compilation")
 if "clips" not in st.session_state:
@@ -97,13 +152,23 @@ with st.form("add_clip_form"):
             "Start Time": start_time,
             "Duration": duration,
             "End Time": calc_end_time(start_time, duration),
-            "Output Name": out_name
+            "Output Name": out_name,
+            "Caption": ""
         })
         st.success(f"Added {out_name}")
 
 if st.session_state.clips:
     st.write("### Queued Clips")
-    st.table(st.session_state.clips)
+    st.info("💡 Edit the table below to tweak durations or captions, or use the toolbar to add/delete clips before compiling.")
+    
+    # st.data_editor creates an interactive table
+    edited_clips = st.data_editor(
+        st.session_state.clips,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="timeline_editor"
+    )
+    st.session_state.clips = edited_clips
     
     if st.button("Clear Queue"):
         st.session_state.clips = []
@@ -118,11 +183,28 @@ if st.session_state.clips:
                 st.success(f"Clips exported to {out_dir}")
                 
     with colB:
+        burn_captions = st.checkbox("🔥 Burn-in AI Captions", value=False, help="Render the AI-generated captions physically onto the video with cinematic formatting.")
         if st.button("Compile Unified B-Roll"):
             with st.spinner("Compiling..."):
                 try:
-                    final_out = core.compile_unified_broll(media_dir, st.session_state.clips)
+                    final_out = core.compile_unified_broll(media_dir, st.session_state.clips, burn_captions=burn_captions)
                     st.success(f"Unified B-roll compiled to {final_out}")
+                    
+                    # QA Verification
+                    with st.spinner("Running QA Verification..."):
+                        qa_report = core.verify_compilation(final_out)
+                    
+                    st.markdown("### 📊 QA Verification Report")
+                    if qa_report.get("Status") == "Passed":
+                        st.success("Verification Passed")
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Duration", f"{qa_report.get('Duration (sec)')}s")
+                        c2.metric("Resolution", qa_report.get('Resolution'))
+                        c3.metric("FPS", qa_report.get('FPS'))
+                        c4.metric("Codec", qa_report.get('Codec'))
+                    else:
+                        st.error(f"Verification Failed: {qa_report.get('Status')}")
+                        
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -166,44 +248,114 @@ with tab_script:
             st.error("Please enter a script.")
         else:
             st.session_state.clips = []
-            with st.spinner(f"The AI Director ({director_model}) is reading the script and reviewing contact sheets..."):
-                try:
-                    storyboard = core.generate_storyboard(media_dir, script_text, director_model)
-                    st.session_state.storyboard = storyboard
-                    st.success("Storyboard generated successfully!")
-                except Exception as e:
-                    st.error(str(e))
+            status_text = st.empty()
+            stream_container = st.empty()
+            
+            def stream_update(text):
+                if text.startswith("Visual analysis:"):
+                    status_text.text(text)
+                else:
+                    status_text.text("AI Director is generating storyboard...")
+                    stream_container.markdown(f"```json\n{text}\n```")
+                    
+            try:
+                storyboard = core.generate_storyboard(media_dir, script_text, director_model, stream_callback=stream_update)
+                status_text.text("Finished!")
+                st.session_state.storyboard = storyboard
+                st.success("Storyboard generated successfully!")
+            except Exception as e:
+                st.error(str(e))
 
 with tab_audio:
+    if "last_audio_summary" in st.session_state:
+        last_audio = st.session_state.last_audio_summary
+        st.subheader("Latest Audio Intelligence Summary")
+        st.write(f"**Analyzed File:** `{last_audio.get('input_file', 'Unknown')}`")
+        
+        summary = last_audio.get("summary", {})
+        
+        # Format the summary into clean metrics
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Quality Score", f"{summary.get('audio_quality_score', 0):.2f}/10")
+        col2.metric("Total Speakers", summary.get("total_speakers", 0))
+        col3.metric("Speech Coverage", f"{summary.get('speech_coverage_pct', 0):.1f}%")
+        col4.metric("Total Words", summary.get("total_words", 0))
+        
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("Music Detected", "Yes" if summary.get("music_present") else "No")
+        col6.metric("Tempo (BPM)", f"{summary.get('tempo_bpm', 0):.1f}" if summary.get("music_present") else "N/A")
+        col7.metric("Silence Regions", summary.get("silence_regions", 0))
+        col8.metric("Noise Flags", summary.get("noise_flags", 0))
+        
+        st.divider()
+
     if media_dir and os.path.exists(media_dir):
         media_files = [f for f in os.listdir(media_dir) if f.endswith(('.mp4', '.mov', '.wav', '.mp3'))]
         if media_files:
             audio_file = st.selectbox("Select Media File to Analyze", media_files)
             if st.button("🎧 Run Audio Intelligence Pipeline"):
-                with st.spinner(f"Running 5-module Audio Intelligence on {audio_file}... This may take a few minutes."):
-                    try:
-                        report = core.run_audio_pipeline(media_dir, audio_file)
-                        st.success(f"Audio Intelligence Complete! Quality Score: {report['summary']['audio_quality_score']:.2f}")
-                        
-                        # Fetch the generated hints which are saved to output_dir
-                        hints_path = os.path.join(media_dir, "audio_reports", "audio_storyboard_hints.json")
-                        if os.path.exists(hints_path):
-                            import json
-                            with open(hints_path, "r") as f:
-                                audio_hints = json.load(f)
-                            # Convert to format compatible with storyboard UI
-                            st.session_state.storyboard = {
-                                "summary": {
-                                    "total_suggestions": len(audio_hints),
-                                    "high_priority": len([h for h in audio_hints if h.get("priority") == "high"]),
-                                    "medium_priority": len([h for h in audio_hints if h.get("priority") == "medium"]),
-                                    "estimated_edit_time_min": len(audio_hints) * 2
-                                },
-                                "storyboard": audio_hints
-                            }
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Audio Pipeline failed: {str(e)}")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                def audio_progress(pct, msg):
+                    progress_bar.progress(pct)
+                    status_text.text(msg)
+                    
+                status_text.text(f"Running 5-module Audio Intelligence on {audio_file}... This may take a few minutes.")
+                try:
+                    report = core.run_audio_pipeline(media_dir, audio_file, progress_callback=audio_progress)
+                    status_text.text("Finished!")
+                    summary = report.get("summary", {})
+                    quality_score = summary.get("audio_quality_score", 0.0)
+                    st.success(f"Audio Intelligence Complete! Quality Score: {quality_score:.2f}")
+
+                    import json
+                    import time
+
+                    summary_dir = os.path.join(media_dir, "audio_reports")
+                    os.makedirs(summary_dir, exist_ok=True)
+                    summary_path = os.path.join(
+                        summary_dir,
+                        f"audio_summary_{os.path.splitext(audio_file)[0]}_{int(time.time())}.json"
+                    )
+                    summary_payload = {
+                        "input_file": audio_file,
+                        "input_path": os.path.join(media_dir, audio_file),
+                        "summary": summary,
+                        "duration_sec": report.get("duration_sec", 0),
+                        "audio_report_path": os.path.join(summary_dir, "audio_report.json"),
+                    }
+                    with open(summary_path, "w") as f:
+                        json.dump(summary_payload, f, indent=2)
+
+                    st.session_state.last_audio_summary = {
+                        "input_file": audio_file,
+                        "summary": summary,
+                        "summary_path": summary_path,
+                    }
+                    st.subheader("Audio Intelligence Summary")
+                    st.write(f"**Input:** {audio_file}")
+                    st.write(f"**Summary file:** {summary_path}")
+                    st.json(summary)
+                    
+                    # Fetch the generated hints which are saved to output_dir
+                    hints_path = os.path.join(media_dir, "audio_reports", "audio_storyboard_hints.json")
+                    if os.path.exists(hints_path):
+                        with open(hints_path, "r") as f:
+                            audio_hints = json.load(f)
+                        # Convert to format compatible with storyboard UI
+                        st.session_state.storyboard = {
+                            "summary": {
+                                "total_suggestions": len(audio_hints),
+                                "high_priority": len([h for h in audio_hints if h.get("priority") == "high"]),
+                                "medium_priority": len([h for h in audio_hints if h.get("priority") == "medium"]),
+                                "estimated_edit_time_min": len(audio_hints) * 2
+                            },
+                            "storyboard": audio_hints
+                        }
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Audio Pipeline failed: {str(e)}")
         else:
             st.warning("No valid media files found in directory.")
     else:
@@ -269,7 +421,8 @@ if "storyboard" in st.session_state and st.session_state.storyboard:
                             "Start Time": start_str,
                             "Duration": dur_str,
                             "End Time": calc_end_time(start_str, dur_str),
-                            "Output Name": f"clip_{len(st.session_state.clips)}.mp4"
+                            "Output Name": f"clip_{len(st.session_state.clips)}.mp4",
+                            "Caption": event.get("caption", "")
                         })
                         st.rerun()
                 elif action == "music_change":
@@ -372,3 +525,95 @@ with tab6:
                 st.audio(out_path)
             except Exception as e:
                 st.error(str(e))
+
+# --- Safe FCPXML workflow added by Codex ---
+st.header("6. Safe Final Cut XML + Batch Rename")
+st.markdown(
+    "Crash-safe workflow proven with the Noor Women project: still photos are "
+    "converted into short MP4 proxies, then the XML references only video media."
+)
+
+try:
+    safe_media_files = safe_fcpxml.media_files(media_dir)
+except Exception as e:
+    safe_media_files = []
+    st.error(str(e))
+
+if not safe_media_files:
+    st.info("No image/video media found for the safe XML workflow.")
+else:
+    st.success(f"Safe workflow sees {len(safe_media_files)} image/video files.")
+
+    st.subheader("Batch Rename")
+    rename_selection = st.multiselect(
+        "Select files to rename",
+        safe_media_files,
+        default=safe_media_files[: min(10, len(safe_media_files))],
+        key="safe_rename_selection",
+    )
+    rename_rows = []
+    for selected_name in rename_selection:
+        suggested = os.path.splitext(selected_name)[0].lower().replace(" ", "_")
+        new_stem = st.text_input(
+            f"New name for {selected_name}",
+            value=suggested,
+            key=f"safe_rename_{selected_name}",
+        )
+        rename_rows.append({"File Name": selected_name, "New Name": new_stem})
+
+    if st.button("Rename Selected Media", key="safe_batch_rename"):
+        try:
+            manifest = safe_fcpxml.rename_media_batch(media_dir, rename_rows, prefix=True)
+            st.success(f"Rename manifest created: {manifest}")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+    st.subheader("Final Cut Safe XML")
+    timeline_selection = st.multiselect(
+        "Select timeline files in order",
+        safe_media_files,
+        default=safe_media_files[: min(20, len(safe_media_files))],
+        key="safe_timeline_selection",
+    )
+    default_duration = st.number_input(
+        "Default clip duration, seconds",
+        min_value=1.0,
+        max_value=30.0,
+        value=5.0,
+        step=0.5,
+        key="safe_duration",
+    )
+    safe_project_name = st.text_input(
+        "Project name",
+        value="Noor Women Safe Source Timeline",
+        key="safe_project_name",
+    )
+    timeline_rows = [
+        {
+            "File Name": filename,
+            "Start Time": "00:00:00",
+            "Duration": f"00:00:{int(default_duration):02d}",
+            "Output Name": filename,
+        }
+        for filename in timeline_selection
+    ]
+
+    if st.button("Create Crash-Safe Final Cut XML", key="safe_fcpxml_export"):
+        try:
+            xml_path, manifest_path = safe_fcpxml.generate_final_cut_safe_xml(
+                media_dir,
+                timeline_rows,
+                project_name=safe_project_name,
+            )
+            st.success(f"Final Cut XML created: {xml_path}")
+            st.info(f"Timeline manifest: {manifest_path}")
+            with open(xml_path, "rb") as f:
+                st.download_button(
+                    "Download Safe FCPXML",
+                    data=f,
+                    file_name=os.path.basename(xml_path),
+                    mime="application/xml",
+                )
+        except Exception as e:
+            st.error(str(e))

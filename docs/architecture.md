@@ -1,27 +1,33 @@
 # System Architecture
 
-The toolkit features a decoupled architecture allowing both human and AI interaction:
-*   **Streamlit Frontend (Port 8501)**: A GUI for human editors.
-*   **FastAPI Backend (Port 8000)**: A REST API layer designed for Agentic AI orchestration.
-*   **Core Logic (`core.py`)**: Shared Python module containing all FFmpeg processing.
+The Video Compilation Toolkit follows a clean separation of concerns, divided primarily between a Streamlit frontend and a Python backend, supported by local AI intelligence pipelines.
 
-The core video processing pipeline operates in four distinct stages:
+## 1. Frontend (`app.py`)
+The frontend is built with **Streamlit** and acts as the user's interactive workspace.
+- **State Management:** It heavily utilizes `st.session_state` to store temporary data like the user's `clips` (the editing queue) and the `storyboard` (the AI's suggested timeline).
+- **Core Tabs & Sections:**
+  - Media Directory ingestion.
+  - Video Pre-Processing (Contact Sheets & Summaries).
+  - Editing Queue & Compilation (Stitching via FFmpeg).
+  - AI Director (Script to Storyboard & Audio Intelligence).
 
-## 1. Keyframe Extraction
-Raw MP4 files are processed using FFmpeg to extract low-resolution JPEG thumbnails at fixed intervals (e.g., every 10 or 30 seconds).
+## 2. Backend (`core.py`)
+The backend contains the core business logic, FFmpeg integrations, and AI routing.
+- **FFmpeg Orchestration:** Functions like `extract_clip()`, `stitch_clips()`, and `generate_contact_sheet()` wrap the `ffmpeg` subprocess commands, automatically handling resolution scaling (1080p), framerate normalization (25fps), and stream mapping.
+- **AI Model Routing:** Functions like `generate_summary()` and `generate_storyboard()` manage the API calls to the local Ollama instance (port 11434). It supports mapping logic to swap between `llava`, `moondream`, or `deepseek-coder-v2`.
+- **NLE Exports:** Functions like `generate_fcpxml()` and `generate_edl()` convert the Streamlit queue dictionary into standard XML or text formats for Final Cut Pro and DaVinci Resolve.
 
-## 2. Visual Analysis (Contact Sheets)
-The extracted frames are stitched together into large grid images ("contact sheets") using Python's Pillow library. This allows an AI agent or human editor to visually scan the entire contents of a video in a single glance.
+## 3. Intelligence Pipelines
 
-### 2a. Local AI Vision (Ollama)
-The toolkit integrates directly with **Ollama** running the **LLaVA** multimodal model. Contact sheets are routed to `localhost:11434` where the local AI automatically describes the scenes and suggests descriptive filenames for the clips.
+### Vision Pipeline (`vision/vision_pipeline.py`)
+Designed as a master orchestrator for visual intelligence (Phase 1/2 feature). It runs 6 concurrent modules (scene detection, face tracking, emotion, objects, text, motion) using OpenCV and machine learning models to generate a highly granular `vision_report.json`.
 
-## 3. Segmentation & Normalization
-Specific timestamps are identified. FFmpeg is used to:
-*   Cut the segments losslessly (`-c copy`).
-*   Scale and pad the video to a uniform 1920x1080 resolution.
-*   Lock the frame rate to 25 FPS.
-*   Strip the original audio tracks (`-an`).
+### Audio Pipeline (`audio/audio_pipeline.py`)
+Designed to orchestrate audio intelligence. It extracts the `.wav` from the video and runs 5 parallel threads:
+- **`transcriber.py`**: OpenAI Whisper.
+- **`speaker_diarizer.py`**: Pyannote.audio (Requires `HF_TOKEN`).
+- **`beat_detector.py`**: Librosa tempo/downbeat analysis.
+- **`waveform_analyzer.py`**: RMS analysis for clipping, silence, and drops.
+- **`noise_detector.py`**: Spectral flatness checks for background noise.
 
-## 4. Compilation
-The normalized clips are either exported as individual files for a non-linear editor (NLE) or concatenated into a single seamless B-roll compilation using FFmpeg's `concat` demuxer.
+The audio orchestrator outputs an `audio_report.json` and a series of `Storyboard Hints` which are immediately parsed by the frontend to suggest edit points.

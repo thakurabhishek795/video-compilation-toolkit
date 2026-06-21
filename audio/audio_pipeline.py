@@ -171,9 +171,15 @@ class AudioIntelligencePipeline:
                 cmd, capture_output=True, text=True, timeout=300
             )
             if result.returncode != 0:
+                if "Output file does not contain any stream" in result.stderr or "Output file does not contain any stream" in result.stdout:
+                    raise RuntimeError("No audio track found in this video.")
                 raise RuntimeError(f"ffmpeg failed: {result.stderr}")
             logger.info(f"Audio extracted successfully via ffmpeg: {audio_output_path}")
             return audio_output_path
+        except RuntimeError as e:
+            if "No audio track found" in str(e):
+                raise
+            raise RuntimeError(f"Failed to extract audio from {video_path}: {e}")
         except Exception as e:
             logger.error(f"Audio extraction failed: {e}")
             raise RuntimeError(f"Failed to extract audio from {video_path}: {e}")
@@ -547,7 +553,7 @@ class AudioIntelligencePipeline:
 
         return deduplicated
 
-    def run(self) -> Dict[str, Any]:
+    def run(self, progress_callback=None) -> Dict[str, Any]:
         """
         Run all 5 audio modules in parallel.
 
@@ -596,6 +602,7 @@ class AudioIntelligencePipeline:
                 executor.submit(self._run_noise_detection, self.audio_path): "noise",
             }
 
+            completed_count = 0
             for future in as_completed(future_to_module):
                 module_name = future_to_module[future]
                 try:
@@ -607,6 +614,10 @@ class AudioIntelligencePipeline:
                         f"✗ {module_name} module failed: {e}\n{traceback.format_exc()}"
                     )
                     results[module_name] = {"error": str(e)}
+                
+                completed_count += 1
+                if progress_callback:
+                    progress_callback(completed_count / 5.0, f"Completed {module_name.capitalize()} Analysis...")
 
         # Step 3: Merge results into audio_report
         duration_sec = max(
